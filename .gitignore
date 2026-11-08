@@ -1,0 +1,3 @@
+# build output, personal settings and logs (build.cmd recreates the exe; the app recreates settings.ini)
+bin/
+*.log
