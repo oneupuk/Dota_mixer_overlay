@@ -28,7 +28,7 @@
     "build": "remotion bundle",
     "upgrade": "remotion upgrade",
     "lint": "eslint src && tsc",
-    "render": "remotion still Hero ../hero.jpg --image-format=jpeg --jpeg-quality=90 && remotion still HowToUse ../how-to-use.png && remotion still Controls ../controls.png"
+    "render": "remotion still Hero ../hero.jpg --image-format=jpeg --jpeg-quality=90 && remotion still HowToUse ../how-to-use.png"
   },
   "allowScripts": {
     "esbuild": false

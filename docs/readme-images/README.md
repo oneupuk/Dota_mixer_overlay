@@ -7,10 +7,9 @@
 |---|---|
 | `Hero` | `docs/hero.jpg` |
 | `HowToUse` | `docs/how-to-use.png` |
-| `Controls` | `docs/controls.png` |
 
 ```console
 npm i
-npm run render   # writes all three into docs/
+npm run render   # writes both into docs/
 npm run dev      # Remotion Studio, to tweak layouts
 ```
