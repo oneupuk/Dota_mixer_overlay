@@ -27,7 +27,8 @@ Prefer to build it yourself? Click **Code → Download ZIP** on this page, unzip
 ![1. Launch Dota from Steam. 2. Click the sun/moon. 3. Control your music.](docs/how-to-use.png)
 
 - Click the **sun/moon** in the clock to open or close the player. It also closes by itself after 5 s.
-- Scroll the mouse wheel on the player to change the music's volume.
+- Scroll the mouse wheel on the player to change the music's volume. Only the music app (for example
+  your browser) gets quieter or louder, not Dota or the rest of your PC.
 
 ## Help
 

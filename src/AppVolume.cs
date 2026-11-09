@@ -5,122 +5,181 @@ using System.Runtime.InteropServices;
 namespace DotaGlass
 {
     /// <summary>
-    /// Controls the volume of the app that is playing music (its Windows mixer slider), so you can
-    /// balance music against Dota without touching the game's sound. Falls back to the master volume
-    /// when the media app can't be matched to an audio session.
+    /// Controls the volume of the app that is playing music (its own Windows mixer level, e.g. just the
+    /// browser), so you can balance music against Dota without touching the game or the PC volume.
+    /// Never falls back to the master volume: if the app's audio can't be found, nothing changes.
     /// </summary>
     internal sealed class AppVolume
     {
         static readonly Guid IID_IAudioSessionManager2 = new Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F");
-        static readonly Guid IID_IAudioEndpointVolume = new Guid("5CDF2C82-841E-4546-9722-0CF74078229A");
         const int CLSCTX_ALL = 0x17;
+        const int DEVICE_STATE_ACTIVE = 1;
+        static readonly TimeSpan RetryEvery = TimeSpan.FromSeconds(1);
+
+        /// <summary>
+        /// One audio session of the media app. Windows 11 25H2 no longer exposes ISimpleAudioVolume on
+        /// other apps' sessions (E_NOINTERFACE), only IChannelAudioVolume, so use that when needed:
+        /// the same level on every channel scales the app's sound just like its mixer slider.
+        /// </summary>
+        sealed class Target
+        {
+            public object Session;
+            public ISimpleAudioVolume Simple;
+            public IChannelAudioVolume Channels;
+            public uint ChannelCount;
+        }
 
         IMMDeviceEnumerator enumerator;
-        readonly List<ISimpleAudioVolume> targets = new List<ISimpleAudioVolume>();
-        IAudioEndpointVolume master;
+        readonly List<Target> targets = new List<Target>();
         string boundAumid = "";
+        DateTime lastBindUtc = DateTime.MinValue;
 
-        public bool IsMaster { get { return targets.Count == 0; } }
+        /// <summary>True when the media app's audio was found.</summary>
+        public bool IsBound { get { return targets.Count > 0; } }
 
         /// <summary>Resolve which audio sessions belong to the media app (cheap; called on show / session change).</summary>
         public void Bind(string aumid)
         {
             boundAumid = aumid ?? "";
+            lastBindUtc = DateTime.UtcNow;
             Release();
+            if (boundAumid.Length == 0) return;
             try
             {
                 if (enumerator == null) enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
-                IMMDevice device;
-                if (enumerator.GetDefaultAudioEndpoint(0 /* eRender */, 1 /* eMultimedia */, out device) != 0 || device == null) return;
-
-                if (boundAumid.Length > 0)
+                // every output device, not just the default one: the browser may play on headphones
+                IMMDeviceCollection devices;
+                if (enumerator.EnumAudioEndpoints(0 /* eRender */, DEVICE_STATE_ACTIVE, out devices) != 0 || devices == null) return;
+                uint n;
+                if (devices.GetCount(out n) == 0)
                 {
-                    object o;
-                    Guid iid = IID_IAudioSessionManager2;
-                    if (device.Activate(ref iid, CLSCTX_ALL, IntPtr.Zero, out o) == 0)
+                    for (uint d = 0; d < n; d++)
                     {
-                        var mgr = (IAudioSessionManager2)o;
-                        IAudioSessionEnumerator sessions;
-                        if (mgr.GetSessionEnumerator(out sessions) == 0 && sessions != null)
-                        {
-                            int count;
-                            sessions.GetCount(out count);
-                            for (int i = 0; i < count; i++)
-                            {
-                                object so;
-                                if (sessions.GetSession(i, out so) != 0 || so == null) continue;
-                                var ctl = so as IAudioSessionControl2;
-                                uint pid;
-                                if (ctl == null || ctl.GetProcessId(out pid) != 0 || pid == 0) { Marshal.ReleaseComObject(so); continue; }
-                                string exe = Native.GetProcessFileName(pid);
-                                var vol = so as ISimpleAudioVolume;
-                                if (vol != null && exe != null && Matches(boundAumid, exe)) targets.Add(vol);
-                                else Marshal.ReleaseComObject(so);
-                            }
-                            Marshal.ReleaseComObject(sessions);
-                        }
-                        Marshal.ReleaseComObject(mgr);
+                        IMMDevice device;
+                        if (devices.Item(d, out device) != 0 || device == null) continue;
+                        AddSessions(device);
+                        Marshal.ReleaseComObject(device);
                     }
                 }
-
-                if (targets.Count == 0)
-                {
-                    object o;
-                    Guid iid = IID_IAudioEndpointVolume;
-                    if (device.Activate(ref iid, CLSCTX_ALL, IntPtr.Zero, out o) == 0) master = (IAudioEndpointVolume)o;
-                }
-                Marshal.ReleaseComObject(device);
+                Marshal.ReleaseComObject(devices);
             }
             catch { }
         }
 
-        /// <summary>0..1, or 0.5 if unknown.</summary>
+        void AddSessions(IMMDevice device)
+        {
+            object o;
+            Guid iid = IID_IAudioSessionManager2;
+            if (device.Activate(ref iid, CLSCTX_ALL, IntPtr.Zero, out o) != 0 || o == null) return;
+            var mgr = (IAudioSessionManager2)o;
+            IAudioSessionEnumerator sessions;
+            if (mgr.GetSessionEnumerator(out sessions) == 0 && sessions != null)
+            {
+                int count;
+                sessions.GetCount(out count);
+                for (int i = 0; i < count; i++)
+                {
+                    object so;
+                    if (sessions.GetSession(i, out so) != 0 || so == null) continue;
+                    Target t = null;
+                    try { t = ToTarget(so); } catch { }
+                    if (t != null) targets.Add(t);
+                    else Marshal.ReleaseComObject(so);
+                }
+                Marshal.ReleaseComObject(sessions);
+            }
+            Marshal.ReleaseComObject(mgr);
+        }
+
+        Target ToTarget(object session)
+        {
+            var ctl = session as IAudioSessionControl2;
+            uint pid;
+            if (ctl == null || ctl.GetProcessId(out pid) != 0 || pid == 0) return null;
+            string exe = Native.GetProcessFileName(pid);
+            if (exe == null || !Matches(boundAumid, exe)) return null;
+
+            var t = new Target { Session = session, Simple = session as ISimpleAudioVolume };
+            if (t.Simple == null)
+            {
+                t.Channels = session as IChannelAudioVolume;
+                if (t.Channels == null || t.Channels.GetChannelCount(out t.ChannelCount) != 0 || t.ChannelCount == 0) return null;
+            }
+            return t;
+        }
+
+        /// <summary>0..1, or 1 (the app's default level) if its audio isn't known yet.</summary>
         public double Get()
         {
-            try
+            foreach (var t in targets)
             {
-                float v;
-                if (targets.Count > 0 && targets[0].GetMasterVolume(out v) == 0) return v;
-                if (master != null && master.GetMasterVolumeLevelScalar(out v) == 0) return v;
+                try
+                {
+                    float v;
+                    if (t.Simple != null)
+                    {
+                        if (t.Simple.GetMasterVolume(out v) == 0) return v;
+                    }
+                    else
+                    {
+                        var levels = new float[t.ChannelCount];
+                        if (t.Channels.GetAllVolumes(t.ChannelCount, levels) == 0)
+                        {
+                            float max = 0;
+                            foreach (float l in levels) if (l > max) max = l;
+                            return max;
+                        }
+                    }
+                }
+                catch { }
             }
-            catch { }
-            return 0.5;
+            return 1.0;
         }
 
         public void Set(double value)
         {
             float v = (float)Math.Max(0, Math.Min(1, value));
-            Guid ctx = Guid.Empty;
-            bool failed = false;
-            try
+            if (targets.Count == 0)
             {
-                if (targets.Count > 0)
-                {
-                    foreach (var t in targets) if (t.SetMasterVolume(v, ref ctx) != 0) failed = true;
-                }
-                else if (master != null) failed = master.SetMasterVolumeLevelScalar(v, ref ctx) != 0;
-                else failed = true;
+                // nothing found yet: the browser may have opened its audio stream since - look again
+                if (DateTime.UtcNow - lastBindUtc < RetryEvery) return;
+                Bind(boundAumid);
             }
-            catch { failed = true; }
-
-            if (failed)
+            if (!Apply(v))
             {
                 // session/device went away (e.g. headphones unplugged) - rebind once and retry
                 Bind(boundAumid);
+                Apply(v);
+            }
+        }
+
+        bool Apply(float v)
+        {
+            bool ok = true;
+            Guid ctx = Guid.Empty;
+            foreach (var t in targets)
+            {
                 try
                 {
-                    foreach (var t in targets) t.SetMasterVolume(v, ref ctx);
-                    if (targets.Count == 0 && master != null) master.SetMasterVolumeLevelScalar(v, ref ctx);
+                    int hr;
+                    if (t.Simple != null) hr = t.Simple.SetMasterVolume(v, ref ctx);
+                    else
+                    {
+                        var levels = new float[t.ChannelCount];
+                        for (int i = 0; i < levels.Length; i++) levels[i] = v;
+                        hr = t.Channels.SetAllVolumes(t.ChannelCount, levels, ref ctx);
+                    }
+                    if (hr != 0) ok = false;
                 }
-                catch { }
+                catch { ok = false; }
             }
+            return ok;
         }
 
         void Release()
         {
-            foreach (var t in targets) try { Marshal.ReleaseComObject(t); } catch { }
+            foreach (var t in targets) try { Marshal.ReleaseComObject(t.Session); } catch { }
             targets.Clear();
-            if (master != null) { try { Marshal.ReleaseComObject(master); } catch { } master = null; }
         }
 
         /// <summary>Match a media AUMID (e.g. "Spotify.exe", "SpotifyAB.SpotifyMusic_..!Spotify", "Chrome", "MSEdge") to a process.</summary>
@@ -131,6 +190,7 @@ namespace DotaGlass
             string a = aumid.ToLowerInvariant();
             if (name.Length >= 4 && a.Contains(name)) return true;
             if (name == "firefox" && MediaController.IsHex(aumid)) return true; // Firefox uses a hashed AUMID
+            if (name == "browser" && a.Contains("yandex")) return true;          // Yandex Browser runs as browser.exe
             if (name == "microsoft.media.player" && a.Contains("zunemusic")) return true;
             return false;
         }
@@ -143,8 +203,15 @@ namespace DotaGlass
         [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         interface IMMDeviceEnumerator
         {
-            [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+            [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IMMDeviceCollection devices);
             [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
+        }
+
+        [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IMMDeviceCollection
+        {
+            [PreserveSig] int GetCount(out uint count);
+            [PreserveSig] int Item(uint index, out IMMDevice device);
         }
 
         [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -194,16 +261,14 @@ namespace DotaGlass
             [PreserveSig] int GetMasterVolume(out float level);
         }
 
-        [ComImport, Guid("5CDF2C82-841E-4546-9722-0CF74078229A"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-        interface IAudioEndpointVolume
+        [ComImport, Guid("1C158861-B533-4B30-B1CF-E853E51C59B8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IChannelAudioVolume
         {
-            [PreserveSig] int RegisterControlChangeNotify(IntPtr notify);
-            [PreserveSig] int UnregisterControlChangeNotify(IntPtr notify);
             [PreserveSig] int GetChannelCount(out uint count);
-            [PreserveSig] int SetMasterVolumeLevel(float db, ref Guid ctx);
-            [PreserveSig] int SetMasterVolumeLevelScalar(float level, ref Guid ctx);
-            [PreserveSig] int GetMasterVolumeLevel(out float db);
-            [PreserveSig] int GetMasterVolumeLevelScalar(out float level);
+            [PreserveSig] int SetChannelVolume(uint index, float level, ref Guid ctx);
+            [PreserveSig] int GetChannelVolume(uint index, out float level);
+            [PreserveSig] int SetAllVolumes(uint count, [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)] float[] levels, ref Guid ctx);
+            [PreserveSig] int GetAllVolumes(uint count, [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0), Out] float[] levels);
         }
     }
 }
