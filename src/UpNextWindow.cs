@@ -13,22 +13,31 @@ namespace DotaGlass
 {
     /// <summary>
     /// The "Up next" list under (in a match) or above (in the main menu) the widget: the same never-activating
-    /// glass as the widget, one row per song. Clicking a row plays that song.
+    /// glass as the widget, one row per song, VisibleRows at a time; the mouse wheel or the thin thumb on the right
+    /// scrolls through the rest. Clicking a row plays that song.
     /// </summary>
     internal sealed class UpNextWindow : Window
     {
         public const double BaseWidth = 360, Radius = 18;
-        const double Pad = 8, HeaderH = 22, RowH = 36;
+        const double Pad = 8, HeaderH = 22, RowH = 36, Fade = 14, ThumbInset = 4, MinThumb = 24;
+        const int VisibleRows = 7;
 
         public event Action<UpNext.Track> TrackClicked;
-        /// <summary>Pointer left the list, or a click on it (restarts the widget's idle auto-hide).</summary>
+        /// <summary>Pointer left the list, or a click or scroll on it (restarts the widget's idle auto-hide).</summary>
         public event Action Interacted;
 
         readonly string glassMode;
         readonly GlassBackdrop backdrop;
         readonly Grid root;
         readonly StackPanel rows;
+        readonly ScrollViewer scroller;
+        readonly Border thumb;             // where the list is scrolled to, in the right margin; drag it to scroll
+        readonly Rectangle thumbBar;
+        double dragStartY, dragStartOffset;
         IntPtr hwnd;
+
+        static readonly Brush ThumbIdle = Frozen(new SolidColorBrush(Color.FromArgb(0x59, 255, 255, 255)));
+        static readonly Brush ThumbHot = Frozen(new SolidColorBrush(Color.FromArgb(0xA6, 255, 255, 255)));
 
         public UpNextWindow(string glassMode)
         {
@@ -63,12 +72,37 @@ namespace DotaGlass
                 Foreground = new SolidColorBrush(Color.FromArgb(0x99, 255, 255, 255))
             });
             rows = new StackPanel();
-            content.Children.Add(rows);
+            scroller = new ScrollViewer
+            {
+                Content = rows, Focusable = false,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,   // scrolls, with the glass thumb as its bar
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+            };
+            scroller.PreviewMouseWheel += (s, e) =>
+            {
+                // whole rows per notch, as many as Windows' "lines per notch" (touchpads send parts of a notch)
+                int lines = SystemParameters.WheelScrollLines;
+                if (lines < 0 || lines > VisibleRows) lines = VisibleRows;   // -1: "one screen at a time"
+                scroller.ScrollToVerticalOffset(scroller.VerticalOffset - e.Delta / 120.0 * lines * RowH);
+                e.Handled = true;
+            };
+            scroller.ScrollChanged += (s, e) => UpdateScrollHints();
+            content.Children.Add(scroller);
             root.Children.Add(content);
+
+            thumbBar = new Rectangle { Width = 3, RadiusX = 1.5, RadiusY = 1.5, Fill = ThumbIdle };
+            thumb = new Border
+            {
+                Width = Pad, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top,
+                Background = Brushes.Transparent, Child = thumbBar, Visibility = Visibility.Collapsed
+            };
+            WireThumb();
+            root.Children.Add(thumb);
             Content = new Viewbox { Child = root, Stretch = Stretch.Uniform };
 
             root.MouseLeave += (s, e) => Fire(Interacted);
             root.PreviewMouseDown += (s, e) => Fire(Interacted);
+            root.PreviewMouseWheel += (s, e) => Fire(Interacted);
 
             SourceInitialized += (s, e) =>
             {
@@ -101,6 +135,7 @@ namespace DotaGlass
             Resize(1);
         }
 
+        /// <summary>A new list starts at its top (a new song started, or the list was opened again).</summary>
         public void SetTracks(List<UpNext.Track> tracks)
         {
             rows.Children.Clear();
@@ -110,8 +145,59 @@ namespace DotaGlass
 
         void Resize(int rowCount)
         {
-            root.Height = 4 + HeaderH + rowCount * RowH + Pad;
+            scroller.Height = Math.Min(rowCount, VisibleRows) * RowH;
+            scroller.ScrollToTop();
+            root.Height = 4 + HeaderH + scroller.Height + Pad;
             root.Clip = new RectangleGeometry(new Rect(0, 0, BaseWidth, root.Height), Radius, Radius);
+        }
+
+        // ---------------------------------------------------------------- scrolling
+
+        /// <summary>The thumb's size and place, and a fade on each edge that has more songs past it.</summary>
+        void UpdateScrollHints()
+        {
+            double max = scroller.ScrollableHeight, off = scroller.VerticalOffset, view = scroller.ViewportHeight;
+            if (max < 0.5 || view <= 0)
+            {
+                thumb.Visibility = Visibility.Collapsed;
+                scroller.OpacityMask = null;
+                return;
+            }
+            double track = view - 2 * ThumbInset;
+            thumb.Height = Math.Max(MinThumb, track * view / scroller.ExtentHeight);
+            thumb.Margin = new Thickness(0, 4 + HeaderH + ThumbInset + (track - thumb.Height) * off / max, 0, 0);
+            thumb.Visibility = Visibility.Visible;
+
+            double f = Fade / view;
+            var mask = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(0, 1) };
+            mask.GradientStops.Add(new GradientStop(off > 0.5 ? Colors.Transparent : Colors.Black, 0));
+            mask.GradientStops.Add(new GradientStop(Colors.Black, f));
+            mask.GradientStops.Add(new GradientStop(Colors.Black, 1 - f));
+            mask.GradientStops.Add(new GradientStop(off < max - 0.5 ? Colors.Transparent : Colors.Black, 1));
+            mask.Freeze();
+            scroller.OpacityMask = mask;
+        }
+
+        void WireThumb()
+        {
+            thumb.MouseEnter += (s, e) => thumbBar.Fill = ThumbHot;
+            thumb.MouseLeave += (s, e) => { if (!thumb.IsMouseCaptured) thumbBar.Fill = ThumbIdle; };
+            thumb.LostMouseCapture += (s, e) => { if (!thumb.IsMouseOver) thumbBar.Fill = ThumbIdle; };
+            thumb.MouseLeftButtonDown += (s, e) =>
+            {
+                dragStartY = e.GetPosition(root).Y;
+                dragStartOffset = scroller.VerticalOffset;
+                thumb.CaptureMouse();
+                e.Handled = true;
+            };
+            thumb.MouseMove += (s, e) =>
+            {
+                if (!thumb.IsMouseCaptured) return;
+                double travel = scroller.ViewportHeight - 2 * ThumbInset - thumb.Height;  // thumb's room to move
+                if (travel <= 0) return;
+                scroller.ScrollToVerticalOffset(dragStartOffset + (e.GetPosition(root).Y - dragStartY) * scroller.ScrollableHeight / travel);
+            };
+            thumb.MouseLeftButtonUp += (s, e) => { thumb.ReleaseMouseCapture(); e.Handled = true; };
         }
 
         UIElement Row(UpNext.Track t)
@@ -193,6 +279,8 @@ namespace DotaGlass
         }
 
         static Color Argb(uint c) { return Color.FromArgb((byte)(c >> 24), (byte)(c >> 16), (byte)(c >> 8), (byte)c); }
+
+        static Brush Frozen(Brush b) { b.Freeze(); return b; }
 
         static void Fire(Action a) { if (a != null) a(); }
     }

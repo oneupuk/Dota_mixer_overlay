@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -12,14 +13,24 @@ namespace DotaGlass
     /// <summary>
     /// The music app's own "Next up" list, read through Windows UI Automation - the interface screen readers use -
     /// so it needs no browser extension, no API and no network. It only runs when the list is opened, on a worker
-    /// thread, and leaves the music app as it was: if the queue panel has to be opened to load the songs, it's
-    /// closed again right away (SoundCloud keeps the loaded songs readable after that).
+    /// thread, and leaves the music app as it was: if the queue panel has to be opened (and scrolled) to load the
+    /// songs, it's closed again right away (SoundCloud keeps the loaded songs readable after that).
     /// Supported for now: SoundCloud in Chromium browsers and Firefox, whose pages expose their HTML classes to
     /// UI Automation. Chromium shows only each window's front tab; Firefox shows every loaded tab.
     /// </summary>
     internal sealed class UpNext
     {
-        public const int MaxItems = 5;
+        public const int MaxItems = 20;
+
+        /// <summary>
+        /// SoundCloud only builds the queue rows around where its panel is scrolled to (~13-15 songs after the playing
+        /// one right after the panel opens), and builds no more while the panel is closed, even when scrolled. With
+        /// fewer than this many songs readable, the panel is opened and scrolled down to build more (~25).
+        /// </summary>
+        const int RefillBelow = 15;
+
+        /// <summary>Last song of the queue as of the last refill that found no more songs: don't try again for it.</summary>
+        volatile string queueEnd;
 
         public sealed class Track
         {
@@ -67,25 +78,25 @@ namespace DotaGlass
                 sawSoundCloud = true;
 
                 var rows = Rows(page);
-                if (Current(rows, currentTitle) < 0)
+                int playing = Current(rows, currentTitle);
+                if (playing < 0 || ShortList(rows, playing))
                 {
-                    // SoundCloud only loads "Next up" once its panel has been opened, and doesn't keep it up to date
-                    // while the panel is closed: open it (again) and wait until it shows this song
-                    if (OpenQueuePanel(hwnd, page, currentTitle))
+                    // SoundCloud only loads "Next up" once its panel has been opened, doesn't keep it up to date while
+                    // the panel is closed, and only builds the rows around where the panel is scrolled to: open it
+                    // (again), let it scroll to this song, scroll on to build more songs after it, and close it again
+                    var queue = Find(page, e => HasClass(e, "queue")) ?? page;
+                    bool wasOpen = IsOpen(queue);
+                    if (wasOpen || OpenQueuePanel(hwnd, page, currentTitle))
                     {
-                        opened = true;
-                        for (int i = 0; i < 8 && Current(rows, currentTitle) < 0; i++)
-                        {
-                            Thread.Sleep(250);
-                            var fresh = Snapshot(hwnd);
-                            page = (fresh == null ? null : SoundCloudPage(fresh, currentTitle)) ?? page;
-                            rows = Rows(page);
-                        }
-                        ClickInBackground(Find(page, e => HasClass(e, "queue__hide")), hwnd);
+                        opened = !wasOpen;
+                        if (opened) queue = Settle(queue, hwnd, currentTitle);
+                        queue = LoadMore(queue, hwnd, currentTitle);
+                        rows = Rows(queue);
+                        if (opened) ClickInBackground(Find(queue, e => HasClass(e, "queue__hide")) ?? Find(page, e => HasClass(e, "queue__hide")), hwnd);
                     }
                     else if (rows.Count == 0) continue;
                 }
-                int playing = Current(rows, currentTitle);
+                playing = Current(rows, currentTitle);
                 Collect(rows, playing >= 0 ? playing : Marked(rows), hwnd, result);
                 if (DebugLog.On)
                     DebugLog.Write("next read " + result.Tracks.Count + " songs in " + sw.ElapsedMilliseconds + " ms (opened panel: " + opened + ")");
@@ -99,10 +110,31 @@ namespace DotaGlass
             return result;
         }
 
-        /// <summary>Worker thread. Plays a song from the list, like clicking it in the app.</summary>
+        /// <summary>
+        /// Worker thread. Plays a song from the list, like clicking it in the app. If SoundCloud has rebuilt its rows
+        /// since the list was read (its panel was opened), the song's row is looked up again.
+        /// </summary>
         public bool Play(Track t)
         {
-            return t != null && ClickInBackground(t.Row, t.Window);
+            if (t == null) return false;
+            var row = Shows(t.Row, t) ? t.Row : FindRow(t);
+            return ClickInBackground(row, t.Window);
+        }
+
+        static bool Shows(AutomationElement row, Track t)
+        {
+            try { return row != null && RowTitle(row.GetUpdatedCache(Request())) == t.Title; }
+            catch { return false; }
+        }
+
+        static AutomationElement FindRow(Track t)
+        {
+            var root = Snapshot(t.Window);
+            if (root == null) return null;
+            foreach (var page in Pages(root))
+                foreach (var r in Rows(page))
+                    if (HasClass(r, "m-upcoming") && RowTitle(r) == t.Title && RowArtist(r) == t.Artist) return r;
+            return null;
         }
 
         // ---------------------------------------------------------------- SoundCloud's queue
@@ -128,11 +160,23 @@ namespace DotaGlass
                 || name.EndsWith(": " + title, StringComparison.OrdinalIgnoreCase);
         }
 
+        /// <summary>
+        /// SoundCloud's queue rows in queue order: top to bottom. Once its list has scrolled, SoundCloud reuses rows
+        /// and moves them into place on screen, so their order in the page isn't the queue's.
+        /// </summary>
         static List<AutomationElement> Rows(AutomationElement root)
         {
             var rows = new List<AutomationElement>();
             foreach (var e in All(root)) if (HasClass(e, "queueItemView")) rows.Add(e);
-            return rows;
+            var tops = new double[rows.Count];
+            for (int i = 0; i < rows.Count; i++)
+            {
+                System.Windows.Rect r;
+                try { r = rows[i].Cached.BoundingRectangle; } catch { return rows; }
+                if (r.IsEmpty) return rows;     // not laid out: the page's order is all there is
+                tops[i] = r.Top;
+            }
+            return Enumerable.Range(0, rows.Count).OrderBy(i => tops[i]).ThenBy(i => i).Select(i => rows[i]).ToList();
         }
 
         /// <summary>
@@ -162,13 +206,106 @@ namespace DotaGlass
             return e == null ? "" : FirstName(e);
         }
 
+        static string RowArtist(AutomationElement row)
+        {
+            var e = Find(row, d => HasClass(d, "queueItemView__username"));
+            return e == null ? "" : e.Cached.Name ?? "";
+        }
+
+        static bool IsUpcoming(AutomationElement row)
+        {
+            return HasClass(row, "m-upcoming") && !HasClass(row, "m-playing");
+        }
+
+        /// <summary>How many songs SoundCloud has built after the playing one (at index "playing").</summary>
+        static int Upcoming(List<AutomationElement> rows, int playing)
+        {
+            int n = 0;
+            if (playing < 0) return 0;
+            for (int i = playing + 1; i < rows.Count; i++) if (IsUpcoming(rows[i])) n++;
+            return n;
+        }
+
+        /// <summary>Fewer songs readable than RefillBelow, and the queue may go on past the last row built.</summary>
+        bool ShortList(List<AutomationElement> rows, int playing)
+        {
+            return Upcoming(rows, playing) < RefillBelow && RowTitle(rows[rows.Count - 1]) != queueEnd;
+        }
+
+        static bool IsOpen(AutomationElement queue)
+        {
+            return Find(queue, e => HasClass(e, "queue") && HasClass(e, "m-visible")) != null;
+        }
+
+        /// <summary>Right after the panel opens, SoundCloud marks the playing song, then scrolls to it (~0.6 s in all).</summary>
+        static AutomationElement Settle(AutomationElement queue, IntPtr hwnd, string title)
+        {
+            for (int i = 0; i < 10; i++)
+            {
+                Thread.Sleep(200);
+                queue = Reread(queue, hwnd, title);
+                if (IsOpen(queue) && Current(Rows(queue), title) >= 0)
+                {
+                    Thread.Sleep(500);
+                    return Reread(queue, hwnd, title);
+                }
+            }
+            return queue;
+        }
+
+        /// <summary>
+        /// Scrolls SoundCloud's open queue panel down, for it to build the rows of more songs after the playing one
+        /// (~0.3 s later). It keeps ~15 rows built above the part it shows, so it scrolls to at most 15 songs past the
+        /// playing one: that row stays built, and the songs right after it stay clickable.
+        /// </summary>
+        AutomationElement LoadMore(AutomationElement queue, IntPtr hwnd, string title)
+        {
+            var rows = Rows(queue);
+            int playing = Current(rows, title), have = Upcoming(rows, playing);
+            if (playing < 0 || have >= MaxItems) return queue;
+            var target = rows[Math.Min(rows.Count - 1, playing + 15)];
+            if (!ScrollIntoView(target)) return queue;
+            for (int i = 0; i < 6; i++)
+            {
+                Thread.Sleep(200);
+                var fresh = Reread(queue, hwnd, title);
+                var now = Rows(fresh);
+                int p = Current(now, title);
+                if (p >= 0 && Upcoming(now, p) > have)
+                {
+                    if (DebugLog.On) DebugLog.Write("next scrolled the queue: " + have + " -> " + Upcoming(now, p) + " songs");
+                    return fresh;
+                }
+            }
+            // nothing more: the end of the queue (or the browser isn't drawing the page just now)
+            if (target == rows[rows.Count - 1]) queueEnd = RowTitle(target);
+            if (DebugLog.On) DebugLog.Write("next found no more songs after \"" + RowTitle(target) + "\"");
+            return queue;
+        }
+
+        /// <summary>The queue panel as SoundCloud has rebuilt it by now; just that part of the page, which is quicker.</summary>
+        static AutomationElement Reread(AutomationElement queue, IntPtr hwnd, string title)
+        {
+            AutomationElement fresh = null;
+            try { fresh = queue.GetUpdatedCache(Request()); } catch { }
+            // the panel always holds its title and buttons: without them, the browser didn't refresh that part alone
+            try { if (fresh != null && fresh.CachedChildren.Count == 0) fresh = null; } catch { fresh = null; }
+            if (fresh == null)
+            {
+                var root = Snapshot(hwnd);
+                fresh = root == null ? null : SoundCloudPage(root, title);
+                if (fresh == null) return queue;
+            }
+            return HasClass(fresh, "queue") ? fresh : Find(fresh, e => HasClass(e, "queue")) ?? fresh;
+        }
+
         /// <summary>The songs after the playing one (at index "playing"; -1 = from the top of the list).</summary>
         static void Collect(List<AutomationElement> rows, int playing, IntPtr window, Result result)
         {
             for (int i = playing + 1; i < rows.Count && result.Tracks.Count < MaxItems; i++)
             {
                 var r = rows[i];
-                if (!HasClass(r, "m-upcoming") || HasClass(r, "m-playing")) continue;
+                if (!IsUpcoming(r)) continue;
                 var t = new Track { Row = r, Window = window };
                 foreach (var e in All(r))
                 {
@@ -235,15 +372,22 @@ namespace DotaGlass
         {
             try
             {
-                var cr = new CacheRequest { TreeScope = TreeScope.Subtree, AutomationElementMode = AutomationElementMode.Full };
-                cr.TreeFilter = Automation.RawViewCondition;
-                cr.Add(AutomationElement.NameProperty);
-                cr.Add(AutomationElement.ClassNameProperty);
-                cr.Add(AutomationElement.AutomationIdProperty);
-                cr.Add(AutomationElement.ControlTypeProperty);
-                using (cr.Activate()) return AutomationElement.FromHandle(hwnd);
+                using (Request().Activate()) return AutomationElement.FromHandle(hwnd);
             }
             catch { return null; }
+        }
+
+        /// <summary>An element and everything in it, with what the reads above look at.</summary>
+        static CacheRequest Request()
+        {
+            var cr = new CacheRequest { TreeScope = TreeScope.Subtree, AutomationElementMode = AutomationElementMode.Full };
+            cr.TreeFilter = Automation.RawViewCondition;
+            cr.Add(AutomationElement.NameProperty);
+            cr.Add(AutomationElement.ClassNameProperty);
+            cr.Add(AutomationElement.AutomationIdProperty);
+            cr.Add(AutomationElement.ControlTypeProperty);
+            cr.Add(AutomationElement.BoundingRectangleProperty);   // the queue's order, see Rows
+            return cr;
         }
 
         static IEnumerable<AutomationElement> All(AutomationElement e)
@@ -307,6 +451,19 @@ namespace DotaGlass
                 object p;
                 if (!e.TryGetCurrentPattern(InvokePattern.Pattern, out p)) return false;
                 ((InvokePattern)p).Invoke();
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Scrolls the page so the element shows (Firefox and Chromium center it); no click, no focus change.</summary>
+        static bool ScrollIntoView(AutomationElement e)
+        {
+            try
+            {
+                object p;
+                if (!e.TryGetCurrentPattern(ScrollItemPattern.Pattern, out p)) return false;
+                ((ScrollItemPattern)p).ScrollIntoView();
                 return true;
             }
             catch { return false; }

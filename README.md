@@ -29,10 +29,12 @@ Prefer to build it yourself? Click **Code → Download ZIP** on this page, unzip
 
 - Click the **sun/moon** in the clock to open or close the player. It also closes by itself after 5 s.
 - In Dota's **main menu**, click the **♪** button next to **PLAY DOTA**: the same player opens above it.
-- **Up next:** click the small arrow next to the song title to see the next 5 songs in your list, and
-  click one to play it. Works with SoundCloud in Firefox, Chrome, Edge, Opera, Brave, Vivaldi or Yandex. The
-  overlay reads the list straight from the SoundCloud tab: no browser extension, no login, nothing sent
-  over the internet. The first time, the list can take a couple of seconds to appear.
+- **Up next:** click the small arrow next to the song title to see the next 20 songs in your list (scroll
+  with the mouse wheel), and click one to play it. Works with SoundCloud in Firefox, Chrome, Edge, Opera,
+  Brave, Vivaldi or Yandex. The overlay reads the list straight from the SoundCloud tab: no browser
+  extension, no login, nothing sent over the internet. The first time, and about every dozen songs after,
+  the list takes a couple of seconds to appear: the overlay opens SoundCloud's Next up for a moment to load
+  more songs, then closes it again.
 - Scroll the mouse wheel on the player to change the music's volume. Only the music app (for example
   your browser) gets quieter or louder, not Dota or the rest of your PC.
 
