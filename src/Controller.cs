@@ -15,6 +15,10 @@ namespace DotaGlass
         const string InProgress = "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS";
         const string PreGame = "DOTA_GAMERULES_STATE_PRE_GAME";
 
+        // Dota sends no game state at all in its main menu, while in a game it posts at least once a second
+        // (heartbeat 1.0): this long without a post means the menu.
+        const int MenuAfterSilenceMs = 5000;
+
         // Dota's main menu, in 1080p pixels (its dashboard scales with the window height like the HUD).
         // PLAY DOTA, measured on a 16:9 dashboard from the bottom-right corner it hangs off.
         const double MenuButtonSize = 42;
@@ -39,6 +43,8 @@ namespace DotaGlass
         Tray tray;
         DispatcherTimer ticker;
         DispatcherTimer idleTimer;         // auto-hide after N seconds without interaction
+        System.Threading.Timer gsiSilence; // fires when Dota stops posting: back in the main menu
+        volatile int lastGsiTick;          // Environment.TickCount of the last post
         Native.WinEventProc foregroundProc;
         IntPtr foregroundHook;
 
@@ -96,6 +102,7 @@ namespace DotaGlass
             tray.SetPreviewChecked(preview);
 
             InstallGsiConfig(true);
+            gsiSilence = new System.Threading.Timer(OnGsiSilence, null, MenuAfterSilenceMs, System.Threading.Timeout.Infinite);
             StartGsi();
             media.Start();
 
@@ -185,10 +192,12 @@ namespace DotaGlass
         /// <summary>I/O thread. Only wakes the UI thread when something actually changed.</summary>
         void OnGsiState(string state)
         {
+            lastGsiTick = Environment.TickCount;
+            gsiSilence.Change(MenuAfterSilenceMs, System.Threading.Timeout.Infinite);
             bool firstPacket = !gsiSeen;
             gsiSeen = true;
             bool match = state == InProgress || (state == PreGame && settings.ShowInPreGame);
-            bool menu = state == null;     // the dashboard: heartbeats without a map
+            bool menu = state == null;     // a post without a map: not in a game
             bool stateChanged = state != lastState;
             lastState = state;
 
@@ -216,6 +225,17 @@ namespace DotaGlass
             }
         }
 
+        /// <summary>Timer thread. No game state for a while: Dota is in its main menu (or not running at all).</summary>
+        void OnGsiSilence(object _)
+        {
+            if (inMenu && !inMatch) return;
+            if (gsiSeen && Environment.TickCount - lastGsiTick < MenuAfterSilenceMs - 250) return; // a post just came in
+            if (DebugLog.On) DebugLog.Write("gsi  silent for " + MenuAfterSilenceMs + " ms -> main menu");
+            inMatch = false;
+            inMenu = true;
+            ui.BeginInvoke(new Action(() => { RecheckForeground(); UpdateVisibility(); UpdateStatus(); }));
+        }
+
         void RecheckForeground()
         {
             IntPtr fg = Native.GetForegroundWindow();
@@ -227,6 +247,15 @@ namespace DotaGlass
         void OnForegroundChanged(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
         {
             TrackForeground(hwnd);
+            if (!dotaFocused && overlayShown && (uint)(Environment.TickCount - UpNext.LastBrowserClick) < 1000)
+            {
+                // Firefox steps in front for a moment after an up-next click and UpNext puts Dota back:
+                // don't blink the widget meanwhile, just check again in a second
+                var later = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+                later.Tick += (s, e) => { later.Stop(); RecheckForeground(); UpdateVisibility(); };
+                later.Start();
+                return;
+            }
             UpdateVisibility();
         }
 
@@ -555,6 +584,7 @@ namespace DotaGlass
         public void Dispose()
         {
             if (foregroundHook != IntPtr.Zero) Native.UnhookWinEvent(foregroundHook);
+            if (gsiSilence != null) gsiSilence.Dispose();
             if (gsi != null) gsi.Stop();
             if (tray != null) tray.Dispose();
         }
