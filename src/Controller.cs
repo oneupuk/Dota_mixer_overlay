@@ -27,6 +27,12 @@ namespace DotaGlass
         Dispatcher ui;
         OverlayWindow overlay;
         HotspotWindow clockButton;        // invisible button over the sun/moon in Dota's clock
+        UpNextWindow upNextList;           // the music app's next songs, under/over the widget
+        readonly UpNext upNext = new UpNext();
+        bool upNextOpen;
+        int upNextToken;                   // drops results of a read the user no longer waits for
+        string upNextFor;                  // the song that was playing when the list was read
+        int widgetX, widgetY, widgetW, widgetH;
         MediaController media;
         AppVolume volume;
         GsiServer gsi;
@@ -73,6 +79,11 @@ namespace DotaGlass
             idleTimer = new DispatcherTimer(DispatcherPriority.Background, ui);
             idleTimer.Tick += OnIdle;
             overlay.Interacted += RestartIdle;
+
+            upNextList = new UpNextWindow(settings.Glass);
+            overlay.UpNextClicked += ToggleUpNext;
+            upNextList.TrackClicked += PlayFromUpNext;
+            upNextList.Interacted += RestartIdle;
 
             clockButton = new HotspotWindow();
             clockButton.Clicked += ToggleWidget;
@@ -292,6 +303,7 @@ namespace DotaGlass
                 overlayShown = false;
                 ticker.Stop();
                 idleTimer.Stop();
+                CloseUpNext();
                 overlay.HideOverlay(animate);
             }
         }
@@ -332,7 +344,7 @@ namespace DotaGlass
         {
             idleTimer.Stop();
             if (!AutoHideActive) return;
-            if (overlay.IsInUse) { idleTimer.Start(); return; } // pointer still on it: check again later
+            if (overlay.IsInUse || upNextList.IsInUse) { idleTimer.Start(); return; } // pointer still on it: check again later
             widgetOpen = false;
             UpdateVisibility(true);                              // same fold-up as clicking the sun/moon
         }
@@ -355,7 +367,7 @@ namespace DotaGlass
             int h = (int)Math.Round(OverlayWindow.BaseHeight * s);
             int x = r.Left + (r.Width - w) / 2;
             int y = r.Top + (int)Math.Round(settings.OffsetY * hud);
-            overlay.Place(x, y, w, h);
+            PlaceWidget(x, y, w, h);
 
             // the button follows Dota's HUD only (not the widget's Scale)
             int bs = (int)Math.Round(HotspotWindow.BaseSize * hud);
@@ -370,11 +382,79 @@ namespace DotaGlass
             int right = r.Right - (int)Math.Round(PlayRight * hud);
             int w = (int)Math.Round(PlayWidth * hud * settings.Scale);
             int h = (int)Math.Round(w * OverlayWindow.BaseHeight / OverlayWindow.BaseWidth);
-            overlay.Place(right - w, r.Bottom - (int)Math.Round((PlayTop + 12) * hud) - h, w, h);
+            PlaceWidget(right - w, r.Bottom - (int)Math.Round((PlayTop + 12) * hud) - h, w, h);
 
             int bs = (int)Math.Round(MenuButtonSize * hud);
             int bx = r.Right - (int)Math.Round((PlayRight + PlayWidth + 10) * hud) - bs;
             clockButton.Place(bx, r.Bottom - (int)Math.Round(PlayCenterY * hud) - bs / 2, bs);
+        }
+
+        void PlaceWidget(int x, int y, int w, int h)
+        {
+            widgetX = x; widgetY = y; widgetW = w; widgetH = h;
+            overlay.Place(x, y, w, h);
+            if (upNextOpen) PlaceUpNext();
+        }
+
+        /// <summary>Same width as the widget; below it in a match, above it in the main menu.</summary>
+        void PlaceUpNext()
+        {
+            int h = upNextList.HeightFor(widgetW);
+            int gap = (int)Math.Round(8 * lastRect.Height / 1080.0);
+            upNextList.Place(widgetX, menuLayout ? widgetY - gap - h : widgetY + widgetH + gap, widgetW, h);
+        }
+
+        // ---------------------------------------------------------------- up next
+
+        void ToggleUpNext()
+        {
+            RestartIdle();
+            if (upNextOpen) { CloseUpNext(); return; }
+            upNextOpen = true;
+            upNextList.SetMessage("Loading…");
+            PlaceUpNext();
+            upNextList.ShowList();
+            LoadUpNext();
+        }
+
+        /// <summary>Reads the list on a worker thread (UI Automation calls block for ~0.1-1 s).</summary>
+        void LoadUpNext()
+        {
+            int token = ++upNextToken;
+            string app = media.AppId, title = media.Title;
+            upNextFor = title;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                UpNext.Result r;
+                try { r = upNext.Read(app, title); }
+                catch (Exception ex) { Program.Log(ex); r = new UpNext.Result { Problem = "Couldn't read the list" }; }
+                ui.BeginInvoke(new Action(() =>
+                {
+                    if (token != upNextToken || !upNextOpen) return;
+                    if (r.Tracks.Count > 0) upNextList.SetTracks(r.Tracks);
+                    else upNextList.SetMessage(r.Problem);
+                    PlaceUpNext();
+                }));
+            });
+        }
+
+        void CloseUpNext()
+        {
+            if (!upNextOpen) return;
+            upNextOpen = false;
+            upNextToken++;
+            upNextList.HideList();
+        }
+
+        void PlayFromUpNext(UpNext.Track t)
+        {
+            if (DebugLog.On) DebugLog.Write("next play \"" + t.Title + "\"");
+            CloseUpNext();
+            RestartIdle();
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try { upNext.Play(t); } catch (Exception ex) { Program.Log(ex); }
+            });
         }
 
         // ---------------------------------------------------------------- media -> overlay
@@ -401,10 +481,13 @@ namespace DotaGlass
 
             if (full || sessionShown != media.SessionVersion)
             {
+                if (sessionShown != media.SessionVersion) CloseUpNext(); // another app: its list would be wrong
                 sessionShown = media.SessionVersion;
                 volume.Bind(media.AppId);
                 overlay.SetVolume(volume.Get());
             }
+            overlay.SetUpNextAvailable(media.HasSession && UpNext.Supports(media.AppId));
+            if (upNextOpen && media.Title != upNextFor) LoadUpNext();  // next song started: move the list on
             if (artShown != media.ArtVersion) LoadArt();
 
             bool tick = media.IsPlaying && media.Duration > TimeSpan.Zero;

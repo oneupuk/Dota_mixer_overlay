@@ -24,6 +24,7 @@ if not exist bin mkdir bin
   /r:"%FW%\System.Threading.Tasks.dll" /r:"%FW%\System.IO.dll" /r:"%FW%\System.Numerics.dll" /r:"%FW%\System.Numerics.Vectors.dll" ^
   /r:"%WINMD%\Windows.Foundation.winmd" /r:"%WINMD%\Windows.Media.winmd" /r:"%WINMD%\Windows.Storage.winmd" ^
   /r:"%WINMD%\Windows.UI.winmd" /r:"%WINMD%\Windows.Graphics.winmd" ^
+  /r:"%WPF%\UIAutomationClient.dll" /r:"%WPF%\UIAutomationTypes.dll" /r:Accessibility.dll ^
   src\*.cs
 if errorlevel 1 exit /b 1
 

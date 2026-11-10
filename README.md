@@ -28,6 +28,9 @@ Prefer to build it yourself? Click **Code → Download ZIP** on this page, unzip
 
 - Click the **sun/moon** in the clock to open or close the player. It also closes by itself after 5 s.
 - In Dota's **main menu**, click the **♪** button next to **PLAY DOTA**: the same player opens above it.
+- **Up next** (SoundCloud in Chrome, Edge, Opera, Brave or Yandex): click the small arrow next to the song title to
+  see the next songs, and click one to play it. The overlay reads SoundCloud's own "Next up" list through Windows'
+  screen-reader interface: no browser extension, no account, nothing sent over the internet.
 - Scroll the mouse wheel on the player to change the music's volume. Only the music app (for example
   your browser) gets quieter or louder, not Dota or the rest of your PC.
 

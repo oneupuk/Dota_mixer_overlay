@@ -183,7 +183,7 @@ namespace DotaGlass
         }
 
         /// <summary>Match a media AUMID (e.g. "Spotify.exe", "SpotifyAB.SpotifyMusic_..!Spotify", "Chrome", "MSEdge") to a process.</summary>
-        static bool Matches(string aumid, string exe)
+        internal static bool Matches(string aumid, string exe)
         {
             string name = exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? exe.Substring(0, exe.Length - 4) : exe;
             name = name.ToLowerInvariant();

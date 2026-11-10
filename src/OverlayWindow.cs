@@ -22,7 +22,7 @@ namespace DotaGlass
         static readonly Geometry PlayGeo = Freeze(Geometry.Parse("M8,5 V19 L19,12 Z"));
         static readonly Geometry PauseGeo = Freeze(Geometry.Parse("M6.5,5 H10.5 V19 H6.5 Z M13.5,5 H17.5 V19 H13.5 Z"));
 
-        public event Action PrevClicked, PlayPauseClicked, NextClicked;
+        public event Action PrevClicked, PlayPauseClicked, NextClicked, UpNextClicked;
         public event Action<double> SeekRequested;   // 0..1
         public event Action<double> VolumeRequested; // 0..1
         /// <summary>Pointer left the widget, or a click / scroll on it (restarts the idle auto-hide).</summary>
@@ -37,8 +37,9 @@ namespace DotaGlass
         readonly ScaleTransform rootScale;
         int animToken;
 
-        readonly Border art, artFallback, btnPrev, btnPlay, btnNext;
-        readonly Path playIcon, volWave1, volWave2;
+        readonly Border art, artFallback, btnPrev, btnPlay, btnNext, btnUpNext;
+        readonly Path playIcon, volWave1, volWave2, upNextIcon;
+        readonly FrameworkElement titleBlock;
         readonly TextBlock titleText, artistText, posText, durText;
         readonly Grid seekTrack, volTrack;
         readonly ScaleTransform seekScale, volScale;
@@ -80,6 +81,9 @@ namespace DotaGlass
             btnPrev = (Border)root.FindName("BtnPrev");
             btnPlay = (Border)root.FindName("BtnPlay");
             btnNext = (Border)root.FindName("BtnNext");
+            btnUpNext = (Border)root.FindName("BtnUpNext");
+            upNextIcon = (Path)root.FindName("UpNextIcon");
+            titleBlock = (FrameworkElement)root.FindName("TitleBlock");
             playIcon = (Path)root.FindName("PlayIcon");
             volWave1 = (Path)root.FindName("VolWave1");
             volWave2 = (Path)root.FindName("VolWave2");
@@ -97,6 +101,7 @@ namespace DotaGlass
 
             WireButton(btnPrev, () => Fire(PrevClicked));
             WireButton(btnNext, () => Fire(NextClicked));
+            WireButton(btnUpNext, () => Fire(UpNextClicked));
             WireButton(btnPlay, () =>
             {
                 SetPlaying(!playing); // optimistic; confirmed by the media event a moment later
@@ -139,6 +144,14 @@ namespace DotaGlass
         {
             rootScale.CenterY = up ? BaseHeight : 0;
             if (backdrop != null) backdrop.GrowUp = up;
+            upNextIcon.RenderTransform = up ? new RotateTransform(180) : null; // the list opens the same way
+        }
+
+        /// <summary>The up-next arrow, shown only for music apps whose queue can be read.</summary>
+        public void SetUpNextAvailable(bool on)
+        {
+            btnUpNext.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+            titleBlock.Margin = new Thickness(0, 0, on ? 24 : 0, 0);
         }
 
         /// <summary>animate = liquid drop-down out of the clock (used when toggled from the sun/moon button).</summary>
