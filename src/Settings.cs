@@ -15,6 +15,7 @@ namespace DotaGlass
         public double ButtonY = 15.5;         // center of the sun/moon from the top, in 1080p pixels
         public double AutoHideSeconds = 5;    // close the widget after this long without interaction (0 = never)
         public bool OnlyWhenDotaFocused = true;
+        public bool MenuButton = true;        // music button next to PLAY DOTA in Dota's main menu
         public string Glass = "blur";      // blur | acrylic | none
         public string DotaPath = "";       // optional override, e.g. D:\Steam\steamapps\common\dota 2 beta
 
@@ -50,6 +51,7 @@ namespace DotaGlass
                         case "buttony": if (TryDouble(v, out d)) s.ButtonY = d; break;
                         case "autohideseconds": if (TryDouble(v, out d) && d >= 0) s.AutoHideSeconds = d; break;
                         case "onlywhendotafocused": s.OnlyWhenDotaFocused = Bool(v, s.OnlyWhenDotaFocused); break;
+                        case "menubutton": s.MenuButton = Bool(v, s.MenuButton); break;
                         case "glass": s.Glass = v.ToLowerInvariant(); break;
                         case "dotapath": s.DotaPath = v.Trim('"'); break;
                     }
@@ -85,12 +87,14 @@ AutoHideSeconds={10}
 HideWhenNoMedia={4}
 ; 1 = hide when you alt-tab out of Dota
 OnlyWhenDotaFocused={5}
+; 1 = music button next to PLAY DOTA in Dota's main menu (the widget opens above it)
+MenuButton={11}
 ; blur    = rounded live glass (Windows 11 composition backdrop; plain accent blur on Windows 10)
 ; acrylic = Windows acrylic accent (square-ish corners)   none = tint only, no blur
 Glass={6}
 ; Optional: Dota folder if auto-detect fails, e.g. D:\SteamLibrary\steamapps\common\dota 2 beta
 DotaPath={7}
-", Port, OffsetY, Scale, ShowInPreGame ? 1 : 0, HideWhenNoMedia ? 1 : 0, OnlyWhenDotaFocused ? 1 : 0, Glass, DotaPath, ClockButton ? 1 : 0, ButtonY, AutoHideSeconds));
+", Port, OffsetY, Scale, ShowInPreGame ? 1 : 0, HideWhenNoMedia ? 1 : 0, OnlyWhenDotaFocused ? 1 : 0, Glass, DotaPath, ClockButton ? 1 : 0, ButtonY, AutoHideSeconds, MenuButton ? 1 : 0));
             }
             catch { }
         }

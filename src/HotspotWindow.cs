@@ -13,16 +13,19 @@ namespace DotaGlass
     /// An invisible round button over the sun/moon in Dota's clock. Clicking it toggles the music widget.
     /// It's a layered window whose only visible pixels are an alpha-1 disc (so it catches clicks while
     /// looking like nothing), plus a liquid-glass halo that appears on hover.
+    /// In Dota's main menu there is no clock, so the same window shows a visible glass music-note button.
     /// Clicks land here, not in Dota, and Dota keeps focus.
     /// </summary>
     internal sealed class HotspotWindow : Window
     {
         public const double BaseSize = 32;   // window, in 1080p pixels (room for the halo)
         const double HitSize = 22;           // clickable disc: covers the sun/moon and its rays
+        const double DiscSize = 26;          // main menu: the visible glass button
 
         public event Action Clicked;
 
-        readonly Ellipse halo, ring;
+        readonly Ellipse halo, ring, hit, disc;
+        readonly Path note;
         readonly ScaleTransform press;
         IntPtr hwnd;
         bool active, hover;
@@ -63,10 +66,31 @@ namespace DotaGlass
             rimBrush.Freeze();
             ring = new Ellipse { Width = HitSize, Height = HitSize, Stroke = rimBrush, StrokeThickness = 1.1, Opacity = 0, IsHitTestVisible = false };
 
+            // main-menu look: dark glass disc with a note, like the widget's artwork placeholder
+            var discFill = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(0, 1) };
+            discFill.GradientStops.Add(new GradientStop(Color.FromArgb(0xB3, 0x3A, 0x42, 0x52), 0.0));
+            discFill.GradientStops.Add(new GradientStop(Color.FromArgb(0xD9, 0x0C, 0x0F, 0x14), 1.0));
+            discFill.Freeze();
+            var discRim = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(1, 1) };
+            discRim.GradientStops.Add(new GradientStop(Color.FromArgb(0x99, 255, 255, 255), 0.0));
+            discRim.GradientStops.Add(new GradientStop(Color.FromArgb(0x14, 255, 255, 255), 0.6));
+            discRim.GradientStops.Add(new GradientStop(Color.FromArgb(0x4D, 255, 255, 255), 1.0));
+            discRim.Freeze();
+            disc = new Ellipse { Width = DiscSize, Height = DiscSize, Fill = discFill, Stroke = discRim, StrokeThickness = 1,
+                                 Visibility = Visibility.Collapsed, IsHitTestVisible = false };
+            note = new Path
+            {
+                Width = 11, Height = 11, Stretch = Stretch.Uniform, Fill = new SolidColorBrush(Color.FromArgb(0xE6, 255, 255, 255)),
+                Data = Geometry.Parse("M12,3 V13.55 C11.41,13.21 10.73,13 10,13 C7.79,13 6,14.79 6,17 C6,19.21 7.79,21 10,21 C12.21,21 14,19.21 14,17 V7 H18 V3 Z"),
+                Visibility = Visibility.Collapsed, IsHitTestVisible = false
+            };
+
             // the actual click target: alpha 1/255, invisible but hit-testable
-            var hit = new Ellipse { Width = HitSize, Height = HitSize, Fill = new SolidColorBrush(Color.FromArgb(1, 255, 255, 255)) };
+            hit = new Ellipse { Width = HitSize, Height = HitSize, Fill = new SolidColorBrush(Color.FromArgb(1, 255, 255, 255)) };
 
             grid.Children.Add(halo);
+            grid.Children.Add(disc);
+            grid.Children.Add(note);
             grid.Children.Add(ring);
             grid.Children.Add(hit);
             Content = new Viewbox { Child = grid, Stretch = Stretch.Uniform };
@@ -99,6 +123,13 @@ namespace DotaGlass
                 hwnd = new WindowInteropHelper(this).Handle;
                 Native.MakeNoActivateToolWindow(this, hwnd);
             };
+        }
+
+        /// <summary>true = visible music-note button (main menu), false = invisible disc over the clock's sun/moon.</summary>
+        public void SetMenuStyle(bool on)
+        {
+            disc.Visibility = note.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+            hit.Width = hit.Height = ring.Width = ring.Height = on ? DiscSize : HitSize;
         }
 
         /// <summary>Widget open => keep a faint rim so you can see the toggle is "on".</summary>

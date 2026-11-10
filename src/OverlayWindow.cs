@@ -134,6 +134,13 @@ namespace DotaGlass
             Native.SetWindowPos(hwnd, Native.HWND_TOPMOST, x, y, w, h, Native.SWP_NOACTIVATE);
         }
 
+        /// <summary>true = unfold upward (standing on PLAY DOTA in the main menu), false = drop down out of the clock.</summary>
+        public void SetGrowUp(bool up)
+        {
+            rootScale.CenterY = up ? BaseHeight : 0;
+            if (backdrop != null) backdrop.GrowUp = up;
+        }
+
         /// <summary>animate = liquid drop-down out of the clock (used when toggled from the sun/moon button).</summary>
         public void ShowOverlay(bool animate)
         {

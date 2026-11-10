@@ -6,7 +6,7 @@ using System.Windows.Threading;
 namespace DotaGlass
 {
     /// <summary>
-    /// Glue: shows the overlay only while (in a match) AND (Dota is the focused window) AND (something is playing).
+    /// Glue: shows the overlay only while (in a match or in the main menu) AND (Dota is the focused window).
     /// Everything is event-driven - GSI posts, the foreground-window hook and media events.
     /// The only timer is a 1 Hz progress tick that runs only while the overlay is visible and music is playing.
     /// </summary>
@@ -14,6 +14,11 @@ namespace DotaGlass
     {
         const string InProgress = "DOTA_GAMERULES_STATE_GAME_IN_PROGRESS";
         const string PreGame = "DOTA_GAMERULES_STATE_PRE_GAME";
+
+        // Dota's main menu, in 1080p pixels (its dashboard scales with the window height like the HUD).
+        // PLAY DOTA, measured on a 16:9 dashboard from the bottom-right corner it hangs off.
+        const double MenuButtonSize = 42;
+        const double PlayRight = 60, PlayWidth = 330, PlayTop = 70, PlayCenterY = 45.5;
 
         readonly string[] args;
         Process game;                      // set when Steam launched us as a %command% wrapper
@@ -31,8 +36,9 @@ namespace DotaGlass
         Native.WinEventProc foregroundProc;
         IntPtr foregroundHook;
 
-        volatile bool inMatch, overlayShown, buttonShown, gsiSeen;
+        volatile bool inMatch, inMenu, overlayShown, buttonShown, gsiSeen;
         bool widgetOpen;                   // toggled by the clock button
+        bool menuLayout;                   // button and widget are placed for the main menu, not the match HUD
         string lastState = "\0";           // I/O thread only
         bool dotaFocused, preview;
         IntPtr dotaHwnd;                   // written on UI thread, read on I/O thread (atomic)
@@ -171,16 +177,18 @@ namespace DotaGlass
             bool firstPacket = !gsiSeen;
             gsiSeen = true;
             bool match = state == InProgress || (state == PreGame && settings.ShowInPreGame);
+            bool menu = state == null;     // the dashboard: heartbeats without a map
             bool stateChanged = state != lastState;
             lastState = state;
 
-            if (match != inMatch || stateChanged || firstPacket)
+            if (match != inMatch || menu != inMenu || stateChanged || firstPacket)
             {
                 inMatch = match;
+                inMenu = menu;
                 ui.BeginInvoke(new Action(() => { RecheckForeground(); UpdateVisibility(); UpdateStatus(); }));
                 return;
             }
-            if (!match) return;
+            if (!match && !menu) return;
             // Safety net: Windows doesn't always report a focus change (e.g. when the focused window is
             // hidden), so compare against the real foreground window once per packet.
             if (Native.GetForegroundWindow() != trackedForeground)
@@ -239,22 +247,26 @@ namespace DotaGlass
         /// <summary>
         /// In a match with Dota focused: the clock button is there; the widget shows when it's toggled open
         /// (or, with ClockButton=0, whenever something is playing).
+        /// In the main menu: a visible music button (MenuButton setting) toggles the widget the same way.
         /// </summary>
         void UpdateVisibility() { UpdateVisibility(false); }
 
         void UpdateVisibility(bool animate)
         {
             bool dotaOk = dotaHwnd != IntPtr.Zero && Native.IsWindow(dotaHwnd) && !Native.IsIconic(dotaHwnd);
-            bool ingame = preview || (inMatch && dotaOk && (dotaFocused || !settings.OnlyWhenDotaFocused));
+            bool onDota = dotaOk && (dotaFocused || !settings.OnlyWhenDotaFocused);
+            bool ingame = preview || (inMatch && onDota);
+            bool inmenu = !ingame && inMenu && onDota && settings.MenuButton;
+            if (ingame || inmenu) SetLayout(inmenu);
 
-            bool showButton = ingame && settings.ClockButton;
-            bool showWidget = ingame && (settings.ClockButton
+            bool showButton = (ingame && settings.ClockButton) || inmenu;
+            bool showWidget = inmenu ? widgetOpen : ingame && (settings.ClockButton
                 ? widgetOpen
                 : (preview || media.HasSession || !settings.HideWhenNoMedia));
 
             if (DebugLog.On)
             {
-                string v = "inMatch=" + inMatch + " dotaOk=" + dotaOk + " focused=" + dotaFocused
+                string v = "inMatch=" + inMatch + " inMenu=" + inMenu + " dotaOk=" + dotaOk + " focused=" + dotaFocused
                          + " -> button=" + showButton + " widget=" + showWidget;
                 if (v != lastVis) { lastVis = v; DebugLog.Write("vis  " + v); }
             }
@@ -284,9 +296,20 @@ namespace DotaGlass
             }
         }
 
+        /// <summary>Switch the button's look between the clock (match) and the main menu.</summary>
+        void SetLayout(bool menu)
+        {
+            if (menu == menuLayout) return;
+            menuLayout = menu;
+            if (!preview) widgetOpen = false; // an open widget doesn't follow you from the menu into a match
+            clockButton.SetMenuStyle(menu);
+            overlay.SetGrowUp(menu);          // menu: unfolds upward from PLAY DOTA; match: drops down from the clock
+        }
+
         void ToggleWidget()
         {
             widgetOpen = !widgetOpen;
+            if (DebugLog.On) DebugLog.Write("btn  clicked -> widgetOpen=" + widgetOpen);
             UpdateVisibility(true);
         }
 
@@ -294,7 +317,7 @@ namespace DotaGlass
 
         bool AutoHideActive
         {
-            get { return settings.ClockButton && settings.AutoHideSeconds > 0 && !preview && overlayShown && widgetOpen; }
+            get { return (settings.ClockButton || menuLayout) && settings.AutoHideSeconds > 0 && !preview && overlayShown && widgetOpen; }
         }
 
         void RestartIdle()
@@ -326,6 +349,7 @@ namespace DotaGlass
             lastRect = r;
 
             double hud = r.Height / 1080.0;            // Dota's HUD scales with the game's height
+            if (menuLayout) { PlaceForMenu(r, hud); return; }
             double s = hud * settings.Scale;
             int w = (int)Math.Round(OverlayWindow.BaseWidth * s);
             int h = (int)Math.Round(OverlayWindow.BaseHeight * s);
@@ -338,6 +362,19 @@ namespace DotaGlass
             int bx = r.Left + (r.Width - bs) / 2;
             int by = r.Top + (int)Math.Round(settings.ButtonY * hud) - bs / 2;
             clockButton.Place(bx, by, bs);
+        }
+
+        /// <summary>Main menu: the button sits just left of PLAY DOTA; the widget stands on PLAY DOTA, just as wide.</summary>
+        void PlaceForMenu(RECT r, double hud)
+        {
+            int right = r.Right - (int)Math.Round(PlayRight * hud);
+            int w = (int)Math.Round(PlayWidth * hud * settings.Scale);
+            int h = (int)Math.Round(w * OverlayWindow.BaseHeight / OverlayWindow.BaseWidth);
+            overlay.Place(right - w, r.Bottom - (int)Math.Round((PlayTop + 12) * hud) - h, w, h);
+
+            int bs = (int)Math.Round(MenuButtonSize * hud);
+            int bx = r.Right - (int)Math.Round((PlayRight + PlayWidth + 10) * hud) - bs;
+            clockButton.Place(bx, r.Bottom - (int)Math.Round(PlayCenterY * hud) - bs / 2, bs);
         }
 
         // ---------------------------------------------------------------- media -> overlay
@@ -392,6 +429,7 @@ namespace DotaGlass
             if (gsiProblem != null) s = gsiProblem;
             else if (!gsiSeen) s = "Waiting for Dota (needs -gamestateintegration)";
             else if (inMatch) s = "In match";
+            else if (inMenu) s = "In main menu";
             else s = "Waiting for a match";
             tray.SetStatus(s);
         }

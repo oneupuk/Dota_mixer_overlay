@@ -24,6 +24,9 @@ namespace DotaGlass
         CompositionRoundedRectangleGeometry shape;
         int curW, curH;
 
+        /// <summary>Animate out of the bottom edge instead of the top (widget standing on PLAY DOTA).</summary>
+        public bool GrowUp;
+
         public static bool Supported
         {
             get { return Environment.OSVersion.Version.Major >= 10 && Environment.OSVersion.Version.Build >= 22000; }
@@ -106,7 +109,7 @@ namespace DotaGlass
 
         void Animate(Vector3 s0, Vector3 s1, float o0, float o1, int ms, CompositionEasingFunction ease)
         {
-            visual.CenterPoint = new Vector3(curW / 2f, 0f, 0f); // grow out of the clock above
+            visual.CenterPoint = new Vector3(curW / 2f, GrowUp ? curH : 0f, 0f); // grow out of the clock above / PLAY DOTA below
             var scale = compositor.CreateVector3KeyFrameAnimation();
             scale.InsertKeyFrame(0f, s0);
             scale.InsertKeyFrame(1f, s1, ease);
