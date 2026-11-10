@@ -2,7 +2,8 @@
 
 See and control the song playing on your PC without leaving Dota 2. Click the sun/moon in the game clock
 and a small glass player drops down: play/pause, skip, seek and volume. Works with Spotify, YouTube,
-Apple Music and most other players. Needs Windows 10 or 11.
+Apple Music and most other players. With SoundCloud you can also see the next songs and pick one.
+Needs Windows 10 or 11.
 
 ![The player under the Dota 2 clock](docs/hero.jpg)
 
@@ -28,9 +29,10 @@ Prefer to build it yourself? Click **Code → Download ZIP** on this page, unzip
 
 - Click the **sun/moon** in the clock to open or close the player. It also closes by itself after 5 s.
 - In Dota's **main menu**, click the **♪** button next to **PLAY DOTA**: the same player opens above it.
-- **Up next** (SoundCloud in Chrome, Edge, Opera, Brave or Yandex): click the small arrow next to the song title to
-  see the next songs, and click one to play it. The overlay reads SoundCloud's own "Next up" list through Windows'
-  screen-reader interface: no browser extension, no account, nothing sent over the internet.
+- **Up next:** click the small arrow next to the song title to see the next 5 songs in your list, and
+  click one to play it. Works with SoundCloud in Chrome, Edge, Opera, Brave, Vivaldi or Yandex. The
+  overlay reads the list straight from the SoundCloud tab: no browser extension, no login, nothing sent
+  over the internet. The first time, the list can take a couple of seconds to appear.
 - Scroll the mouse wheel on the player to change the music's volume. Only the music app (for example
   your browser) gets quieter or louder, not Dota or the rest of your PC.
 
@@ -38,6 +40,10 @@ Prefer to build it yourself? Click **Code → Download ZIP** on this page, unzip
 
 - **Nothing shows up in a match:** check that Launch options contain `-gamestateintegration` and Dota is
   in Borderless window mode, then restart Dota.
+- **Up next says "Bring the music tab to the front":** in the browser, click the SoundCloud tab so it's the
+  one showing in its window.
+- **Up next says "works with SoundCloud for now":** the music is playing from another site. Spotify,
+  YouTube and Apple Music still work with the rest of the player.
 - **Moved the folder:** copy the launch option again (step 3), otherwise Steam can't start Dota.
 - **Uninstall:** delete the launch option in Steam, right-click the tray icon → **Exit**, then delete the
   folder.
