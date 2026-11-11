@@ -23,6 +23,15 @@ That's it. Start Dota from Steam as usual: the overlay starts and closes togethe
 Prefer to build it yourself? Click **Code → Download ZIP** on this page, unzip, and double-click
 `build.cmd`. The exe appears in the `bin` folder. Nothing to install.
 
+## Update
+
+1. **Close it:** quit Dota, or right-click the red music-note icon → **Exit**.
+2. **Download** [DotaGlassOverlay.zip](https://github.com/oneupuk/Dota_mixer_overlay/releases/latest/download/DotaGlassOverlay.zip)
+   again and unzip it into the **same folder**, replacing the old files.
+
+Your settings and the Steam launch option stay as they are. Unzipped to a different folder? Copy the
+launch option again (step 3 above).
+
 ## Use
 
 ![1. Launch Dota from Steam. 2. Click the sun/moon. 3. Control your music.](docs/how-to-use.png)
