@@ -37,7 +37,7 @@ namespace DotaGlass
         TimeSpan posAtStamp;
         DateTime stampUtc = DateTime.UtcNow;
         double rate = 1.0;
-        string trackKey = "";
+        int propsRead;                     // numbers the media-properties reads, see Refresh
         IRandomAccessStreamReference thumb;
 
         /// <summary>Raised on the UI thread after state changed.</summary>
@@ -113,7 +113,7 @@ namespace DotaGlass
                 Title = Artist = Album = "";
                 IsPlaying = CanPrev = CanNext = CanPlayPause = CanSeek = false;
                 Duration = posAtStamp = TimeSpan.Zero;
-                if (thumb != null || trackKey != "") { thumb = null; trackKey = ""; ArtVersion++; }
+                if (thumb != null) { thumb = null; ArtVersion++; }
                 Raise();
                 return;
             }
@@ -124,16 +124,18 @@ namespace DotaGlass
                 if ((flags & DirtyTimeline) != 0) ReadTimeline(s);
                 if ((flags & DirtyProps) != 0)
                 {
+                    int read = ++propsRead;
                     var p = await WinRt.Await(s.TryGetMediaPropertiesAsync());
-                    if (!ReferenceEquals(s, session) || p == null) return;
+                    // skipping quickly, reads overlap: one finishing after a newer one would bring back an older song
+                    if (!ReferenceEquals(s, session) || p == null || read != propsRead) return;
                     Title = p.Title ?? "";
                     Artist = p.Artist ?? "";
                     Album = p.AlbumTitle ?? "";
-                    var t = p.Thumbnail;
-                    string key = Title + "\n" + Artist + "\n" + Album;
-                    // apps often send the text first and the artwork in a second update
-                    if (key != trackKey || (t == null) != (thumb == null)) { trackKey = key; ArtVersion++; }
-                    thumb = t;
+                    // Apps often send the new song's text first, still with the last song's cover, and the new cover
+                    // in a later update (Chrome and Edge do): look at the cover again after every update. The same
+                    // picture isn't shown again (Controller.LoadArt), so an unchanged cover doesn't blink.
+                    thumb = p.Thumbnail;
+                    ArtVersion++;
                 }
             }
             catch { }
@@ -253,14 +255,13 @@ namespace DotaGlass
             catch { }
         }
 
-        /// <summary>Decodes the cover art at display size (called lazily, only while the overlay is visible).</summary>
-        public async Task<BitmapSource> LoadArtAsync(int decodeWidth)
+        /// <summary>The cover art as the app sent it (an encoded picture), or null. Read lazily, only while the overlay is visible.</summary>
+        public async Task<byte[]> ReadArtAsync()
         {
             var t = thumb;
             if (t == null) return null;
             try
             {
-                byte[] bytes;
                 using (var ws = await WinRt.Await(t.OpenReadAsync()))
                 {
                     ulong size = ws.Size;
@@ -268,10 +269,21 @@ namespace DotaGlass
                     using (var reader = new DataReader(ws.GetInputStreamAt(0)))
                     {
                         await WinRt.Await(reader.LoadAsync((uint)size));
-                        bytes = new byte[size];
+                        var bytes = new byte[size];
                         reader.ReadBytes(bytes);
+                        return bytes;
                     }
                 }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Decodes cover art at display size; null if there is none or it isn't a picture.</summary>
+        public static BitmapSource DecodeArt(byte[] bytes, int decodeWidth)
+        {
+            if (bytes == null) return null;
+            try
+            {
                 var ms = new MemoryStream(bytes, false);
                 var bmp = new BitmapImage();
                 bmp.BeginInit();

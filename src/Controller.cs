@@ -34,8 +34,11 @@ namespace DotaGlass
         UpNextWindow upNextList;           // the music app's next songs, under/over the widget
         readonly UpNext upNext = new UpNext();
         bool upNextOpen;
-        int upNextToken;                   // drops results of a read the user no longer waits for
-        string upNextFor;                  // the song that was playing when the list was read
+        bool upNextReading;                // one read at a time, see LoadUpNext
+        string upNextApp;                  // the app whose list is open
+        string upNextFor;                  // the song the list was last asked to show
+        string upNextRetriedFor;           // the song already read once more because SoundCloud hadn't caught up with it
+        DispatcherTimer upNextRetry;
         int widgetX, widgetY, widgetW, widgetH;
         MediaController media;
         AppVolume volume;
@@ -58,6 +61,8 @@ namespace DotaGlass
         uint dotaPid;
         RECT lastRect;
         int artShown = -1, sessionShown = -1;
+        byte[] artBytes;                   // the cover on screen, as the app sent it
+        int artPx;                         // ...and how wide it was decoded
         string gsiProblem;
         string lastVis;                    // DebugLog only
 
@@ -90,6 +95,8 @@ namespace DotaGlass
             overlay.UpNextClicked += ToggleUpNext;
             upNextList.TrackClicked += PlayFromUpNext;
             upNextList.Interacted += RestartIdle;
+            upNextRetry = new DispatcherTimer(DispatcherPriority.Background, ui) { Interval = TimeSpan.FromSeconds(1.5) };
+            upNextRetry.Tick += (s, e) => { upNextRetry.Stop(); if (upNextOpen) LoadUpNext(); };
 
             clockButton = new HotspotWindow();
             clockButton.Clicked += ToggleWidget;
@@ -440,38 +447,61 @@ namespace DotaGlass
             RestartIdle();
             if (upNextOpen) { CloseUpNext(); return; }
             upNextOpen = true;
+            upNextApp = media.AppId;
+            upNextRetriedFor = null;
             upNextList.SetMessage("Loading…");
             PlaceUpNext();
             upNextList.ShowList();
             LoadUpNext();
         }
 
-        /// <summary>Reads the list on a worker thread (UI Automation calls block for ~0.1-1 s).</summary>
+        /// <summary>
+        /// Reads the list on a worker thread (UI Automation calls block for ~0.1-1 s, a few s when SoundCloud's panel
+        /// has to be opened). One read at a time: skipping quickly started a read per song, and reads running together
+        /// opened and closed SoundCloud's panel under each other and could find the list empty. A song that starts
+        /// during a read is read right after it.
+        /// </summary>
         void LoadUpNext()
         {
-            int token = ++upNextToken;
+            upNextRetry.Stop();
+            // Firefox drops its player for a moment between songs: keep the list, read it once the player is back
+            if (!media.HasSession) { upNextFor = null; return; }
+            upNextFor = media.Title;
+            if (upNextReading) return;     // UpNextRead reads again for the song playing by then
+            upNextReading = true;
             string app = media.AppId, title = media.Title;
-            upNextFor = title;
             System.Threading.Tasks.Task.Run(() =>
             {
                 UpNext.Result r;
                 try { r = upNext.Read(app, title); }
                 catch (Exception ex) { Program.Log(ex); r = new UpNext.Result { Problem = "Couldn't read the list" }; }
-                ui.BeginInvoke(new Action(() =>
-                {
-                    if (token != upNextToken || !upNextOpen) return;
-                    if (r.Tracks.Count > 0) upNextList.SetTracks(r.Tracks);
-                    else upNextList.SetMessage(r.Problem);
-                    PlaceUpNext();
-                }));
+                ui.BeginInvoke(new Action(() => UpNextRead(app, title, r)));
             });
+        }
+
+        void UpNextRead(string app, string title, UpNext.Result r)
+        {
+            upNextReading = false;
+            if (!upNextOpen) return;
+            if (app != media.AppId || title != media.Title) { LoadUpNext(); return; }   // moved on meanwhile
+            if (r.Tracks.Count == 0 && r.CatchingUp && upNextRetriedFor != title)
+            {
+                // e.g. right after skipping through songs SoundCloud's page can be a moment behind: look again
+                // shortly, keeping what the list shows now
+                upNextRetriedFor = title;
+                upNextRetry.Start();
+                return;
+            }
+            if (r.Tracks.Count > 0) upNextList.SetTracks(r.Tracks);
+            else upNextList.SetMessage(r.Problem);
+            PlaceUpNext();
         }
 
         void CloseUpNext()
         {
             if (!upNextOpen) return;
             upNextOpen = false;
-            upNextToken++;
+            upNextRetry.Stop();
             upNextList.HideList();
         }
 
@@ -510,7 +540,9 @@ namespace DotaGlass
 
             if (full || sessionShown != media.SessionVersion)
             {
-                if (sessionShown != media.SessionVersion) CloseUpNext(); // another app: its list would be wrong
+                // another app: its list would be wrong. Not when the same app's player was only gone for a moment
+                // (Firefox, between songs) or still is.
+                if (sessionShown != media.SessionVersion && media.HasSession && media.AppId != upNextApp) CloseUpNext();
                 sessionShown = media.SessionVersion;
                 volume.Bind(media.AppId);
                 overlay.SetVolume(volume.Get());
@@ -528,9 +560,24 @@ namespace DotaGlass
             int version = media.ArtVersion;
             artShown = version;
             int px = (int)Math.Max(64, Math.Ceiling(52.0 * lastRect.Height / 1080.0 * settings.Scale * 1.5));
-            var bmp = await media.LoadArtAsync(px);
-            if (version == media.ArtVersion) overlay.SetArt(bmp);
-            else artShown = -1;
+            byte[] bytes = await media.ReadArtAsync();
+            if (version != media.ArtVersion) return;                // a newer cover came in meanwhile: its load shows it
+            bool same = px == artPx && SameBytes(bytes, artBytes);
+            if (DebugLog.On)
+                DebugLog.Write("art  v" + version + " \"" + media.Title + "\": " + (bytes == null ? "no cover" : bytes.Length + " bytes")
+                    + (same ? ", same picture" : ", shown"));
+            if (same) return;                                       // the same picture again: don't blink
+            artBytes = bytes;
+            artPx = px;
+            overlay.SetArt(MediaController.DecodeArt(bytes, px));
+        }
+
+        static bool SameBytes(byte[] a, byte[] b)
+        {
+            if (a == null || b == null) return a == b;
+            if (a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+            return true;
         }
 
         // ---------------------------------------------------------------- tray actions

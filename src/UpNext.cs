@@ -43,6 +43,8 @@ namespace DotaGlass
         {
             public readonly List<Track> Tracks = new List<Track>();
             public string Problem;            // shown instead of the list
+            /// <summary>No songs, but SoundCloud's page may just not have caught up with the song yet: worth another look.</summary>
+            public bool CatchingUp;
         }
 
         /// <summary>Chromium browsers (Chrome, Edge, Opera, Brave, Yandex, Vivaldi) and Firefox (a hashed AUMID).</summary>
@@ -58,7 +60,7 @@ namespace DotaGlass
         {
             var sw = Stopwatch.StartNew();
             var result = new Result();
-            bool sawPage = false, sawSoundCloud = false, opened = false;
+            bool sawPage = false, sawSoundCloud = false, sawOtherSong = false, opened = false;
             foreach (IntPtr hwnd in BrowserWindows(aumid, currentTitle))
             {
                 AutomationElement root = null;
@@ -74,7 +76,12 @@ namespace DotaGlass
                 if (Pages(root).Count > 0) sawPage = true;
                 // the SoundCloud page showing this song (another tab may be playing something else)
                 var page = SoundCloudPage(root, currentTitle);
-                if (page == null) continue;
+                if (page == null)
+                {
+                    // a SoundCloud play bar still showing the last song (skipping quickly), or another tab's
+                    if (SoundCloudPage(root, null) != null) sawOtherSong = true;
+                    continue;
+                }
                 sawSoundCloud = true;
 
                 var rows = Rows(page);
@@ -100,12 +107,17 @@ namespace DotaGlass
                 Collect(rows, playing >= 0 ? playing : Marked(rows), hwnd, result);
                 if (DebugLog.On)
                     DebugLog.Write("next read " + result.Tracks.Count + " songs in " + sw.ElapsedMilliseconds + " ms (opened panel: " + opened + ")");
-                if (result.Tracks.Count == 0) result.Problem = "Nothing up next";
+                if (result.Tracks.Count == 0)
+                {
+                    result.Problem = "Nothing up next";
+                    result.CatchingUp = playing < 0;   // the list doesn't show this song (yet)
+                }
                 return result;
             }
             result.Problem = sawSoundCloud ? "Couldn't read SoundCloud's Next up"
                            : sawPage ? "Up next works with SoundCloud for now"
                            : "Bring the music tab to the front of its browser window";
+            result.CatchingUp = sawSoundCloud || sawOtherSong;
             if (DebugLog.On) DebugLog.Write("next read failed in " + sw.ElapsedMilliseconds + " ms: " + result.Problem);
             return result;
         }
@@ -226,10 +238,15 @@ namespace DotaGlass
             return n;
         }
 
-        /// <summary>Fewer songs readable than RefillBelow, and the queue may go on past the last row built.</summary>
+        /// <summary>
+        /// Fewer songs readable than RefillBelow, and the queue may go on past the last row built. With none readable,
+        /// always look again: the refill that found the end may just have come too early (SoundCloud busy right after
+        /// quick skips), and trusting it would show an empty list for a full queue.
+        /// </summary>
         bool ShortList(List<AutomationElement> rows, int playing)
         {
-            return Upcoming(rows, playing) < RefillBelow && RowTitle(rows[rows.Count - 1]) != queueEnd;
+            int have = Upcoming(rows, playing);
+            return have < RefillBelow && (have == 0 || RowTitle(rows[rows.Count - 1]) != queueEnd);
         }
 
         static bool IsOpen(AutomationElement queue)
@@ -265,10 +282,11 @@ namespace DotaGlass
             if (playing < 0 || have >= MaxItems) return queue;
             var target = rows[Math.Min(rows.Count - 1, playing + 15)];
             if (!ScrollIntoView(target)) return queue;
+            var fresh = queue;
             for (int i = 0; i < 6; i++)
             {
                 Thread.Sleep(200);
-                var fresh = Reread(queue, hwnd, title);
+                fresh = Reread(queue, hwnd, title);
                 var now = Rows(fresh);
                 int p = Current(now, title);
                 if (p >= 0 && Upcoming(now, p) > have)
@@ -277,8 +295,9 @@ namespace DotaGlass
                     return fresh;
                 }
             }
-            // nothing more: the end of the queue (or the browser isn't drawing the page just now)
-            if (target == rows[rows.Count - 1]) queueEnd = RowTitle(target);
+            // nothing more: the end of the queue (or the browser isn't drawing the page just now). A closed panel
+            // builds no rows, so it says nothing about where the queue ends.
+            if (target == rows[rows.Count - 1] && IsOpen(fresh)) queueEnd = RowTitle(target);
             if (DebugLog.On) DebugLog.Write("next found no more songs after \"" + RowTitle(target) + "\"");
             return queue;
         }
